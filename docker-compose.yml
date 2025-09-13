@@ -1,0 +1,218 @@
+version: '3.8'
+
+services:
+  # Infrastructure Services
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    # healthcheck:
+    #   test: ["CMD-SHELL", "wget -q --spider http://localhost:9200/ || exit 1"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+
+  # Application Services
+  api:
+    build:
+      context: ./services
+      dockerfile: ../docker/Dockerfile.api
+    container_name: news-api
+    ports:
+      - "8000:8000"
+    environment:
+      - ELASTICSEARCH_HOST=elasticsearch:9200
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+    depends_on:
+      elasticsearch:
+        condition: service_started
+      kafka:
+        condition: service_started
+    volumes:
+      - ./services:/app/services
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: ../docker/Dockerfile.web
+    container_name: news-web
+    ports:
+      - "3000:3000"
+    environment:
+      - API_BASE_URL=http://api:8000
+      - NODE_ENV=production
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Worker Services
+  ingestor:
+    build:
+      context: ./services
+      dockerfile: ../docker/Dockerfile.ingestor
+    container_name: news-ingestor
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC_RAW_ARTICLES=raw_articles
+      - INGEST_INTERVAL_MINUTES=5
+      - RSS_FEEDS=${RSS_FEEDS:-}
+      - NEWSAPI_KEY=${NEWSAPI_KEY:-}
+    depends_on:
+      - kafka
+    volumes:
+      - ./services:/app/services
+    restart: unless-stopped
+
+  parser_deduper:
+    build:
+      context: ./services
+      dockerfile: ../docker/Dockerfile.parser_deduper
+    container_name: news-parser-deduper
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC_RAW_ARTICLES=raw_articles
+      - KAFKA_TOPIC_CLEANED_ARTICLES=cleaned_articles
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DEDUP_WINDOW_HOURS=24
+    depends_on:
+      - kafka
+      - redis
+    volumes:
+      - ./services:/app/services
+    restart: unless-stopped
+
+  normalizer:
+    build:
+      context: ./services
+      dockerfile: ../docker/Dockerfile.normalizer
+    container_name: news-normalizer
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC_CLEANED_ARTICLES=cleaned_articles
+      - KAFKA_TOPIC_NORMALIZED_ARTICLES=normalized_articles
+      - ENABLE_TRANSLATION=false
+      - TARGET_LANGUAGE=en
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
+    depends_on:
+      - kafka
+    volumes:
+      - ./services:/app/services
+    restart: unless-stopped
+
+  llm_enricher:
+    build:
+      context: ./services
+      dockerfile: ../docker/Dockerfile.llm_enricher
+    container_name: news-llm-enricher
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC_NORMALIZED_ARTICLES=normalized_articles
+      - KAFKA_TOPIC_ENRICHED_ARTICLES=enriched_articles
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+    depends_on:
+      - kafka
+    volumes:
+      - ./services:/app/services
+    restart: unless-stopped
+
+  indexer:
+    build:
+      context: ./services
+      dockerfile: ../docker/Dockerfile.indexer
+    container_name: news-indexer
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC_ENRICHED_ARTICLES=enriched_articles
+      - ELASTICSEARCH_HOST=elasticsearch:9200
+      - ELASTICSEARCH_INDEX_PATTERN=news
+      - ES_BATCH_SIZE=100
+    depends_on:
+      elasticsearch:
+        condition: service_started
+      kafka:
+        condition: service_started
+    volumes:
+      - ./services:/app/services
+    restart: unless-stopped
+
+  # Monitoring and Management
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    depends_on:
+      - kafka
+
+volumes:
+  zookeeper-data:
+  zookeeper-logs:
+  kafka-data:
+  elasticsearch-data:
+  redis-data:

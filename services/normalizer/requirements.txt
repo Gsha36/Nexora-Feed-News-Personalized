@@ -1,0 +1,5 @@
+kafka-python==2.0.2
+pydantic==2.5.3
+langdetect==1.0.9
+google-cloud-translate==3.12.1
+python-dateutil==2.8.2

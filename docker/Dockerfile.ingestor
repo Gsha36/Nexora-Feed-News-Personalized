@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy shared modules
+COPY shared/ ./shared/
+
+# Copy ingestor service
+COPY ingestor/ ./ingestor/
+
+# Install dependencies
+RUN pip install -r ingestor/requirements.txt
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+WORKDIR /app/ingestor
+
+CMD ["python", "ingestor.py"]

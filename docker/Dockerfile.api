@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy shared modules
+COPY shared/ ./shared/
+
+# Copy API service
+COPY api/ ./api/
+
+# Install dependencies
+RUN pip install -r api/requirements.txt
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+WORKDIR /app/api
+
+EXPOSE 8000
+
+CMD ["python", "app/main.py"]
